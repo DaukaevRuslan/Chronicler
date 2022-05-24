@@ -7,36 +7,32 @@ import sys, datetime
 import os
 from threading import Thread
 from argparse import ArgumentParser
-from socketserver import *
 import serial
-from socket import *
+import select
+import socket
 
-host_nanopi = '192.168.0.116'
-port_nanopi = 5770
+host_nanopi = ''
+port_nanopi = 5760
 addr_nanopi = (host_nanopi, port_nanopi)
 
-host_serv = '192.168.0.150'
-port_serv = 5770
-addr_serv = (host_serv, port_serv)
-
-tcp_socket = socket(AF_INET, SOCK_STREAM)
-tcp_socket.connect(addr_serv)
+serverSocket = None
+message = None
+con = None
+addr = None
+string_msg = None
+flag_connect = False
 
 parser = ArgumentParser(description=__doc__)
 parser.add_argument("--baudrate", type=int, help="master port baud rate", default=115200)
 parser.add_argument("--device", required=True, help="serial device")
-parser.add_argument("--rate", default=1, type=int, help="requested stream rate")
+parser.add_argument("--rate", default=4, type=int, help="requested stream rate")
 args = parser.parse_args()
 
 ser = serial.Serial('/dev/ttyACM0')
+print("Connected to ACM0")
 
-class MyTCPHandler(StreamRequestHandler):
 
-    def handle(self):    
-        self.data = self.request.recv(1024)
-        print ('client send: '+str(self.data))
-        ser.write(self.data)
-        self.request.sendall(b'Hello from server!')
+
 
 if not os.path.exists("LOGS"):
     os.mkdir("LOGS")
@@ -48,24 +44,27 @@ def wait_heartbeat(m):
     m.wait_heartbeat()
     print("Heartbeat from APM (system %u component %u)" % (m.target_system, m.target_system))
 
-def show_messages(m):
+def show_messages(m, string_msg):
 
-    global arming_flag
-    global tcp_socket
-
+    global arming_flag, message, arming_flag, con
+    count = 0
+    MessageString = ''
     while True:
         msg = m.recv_match(blocking=True)
-
         string_msg = str(msg)
+        MessageString += string_msg
+        count = count + 1
+        if count == 20:
+            con.send(str.encode(MessageString))
+            MessageString = ''
+            count = 0
         print(string_msg)
-        data = str.encode(string_msg)
-        tcp_socket.send(data)
-
+        
         if not msg:
             return
         if msg.get_type() == "BAD_DATA":
             if mavutil.all_printable(msg.data):
-                sys.stdout.write(msg.data)
+                sys.stdout.write(str(msg.data))
                 sys.stdout.flush()
         else:    
 
@@ -80,16 +79,46 @@ def show_messages(m):
                 arming_flag = False
                 file.close()          
 
-server = None
-def launch():   
-    global server
-    server = TCPServer(addr_nanopi, MyTCPHandler)
-    server.serve_forever()
 
 
-th = Thread(target=launch)
+def launch():
+    global serverSocket, message, con, addr, string_msg, flag_connect
+
+    serverSocket = socket.socket()
+    serverSocket.bind((host_nanopi, port_nanopi))
+    serverSocket.listen(1)
+
+    con, addr = serverSocket.accept()
+    #print("DroneGui connected")
+    flag_connect = True
+    # con.send(str.encode("HELLO"))
+    # serverSocket.send(str.encode("HELLO"))
+
+    while True:
+        global string_msg
+        message = con.recv(1024)
+        #con.send(str.encode("HELLO"))
+        if message is not None:
+            ser.write(message)
+            
+
+        if string_msg is not None:
+
+            con.send(str.encode(string_msg))
+            serverSocket.send(str.encode(string_msg))
+
+    con.close()
+
+
+th = Thread(target = launch)
 th.start()
+
 master = mavutil.mavlink_connection(args.device, baud=args.baudrate)
 wait_heartbeat(master)
-show_messages(master)
 
+for i in range(0, 3):
+    master.mav.request_data_stream_send(master.target_system, master.target_component,
+                                        mavutil.mavlink.MAV_DATA_STREAM_ALL, args.rate, 1)
+
+if flag_connect:
+    show_messages(master, string_msg)
